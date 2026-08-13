@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 description = "GTK4/Libadwaita OpenVPN connection manager for Omarchy, using NetworkManager"
 license = "MIT"
-repository = "https://github.com/your-org/omarchy-openvpn-manager"
+repository = "https://github.com/HcDuller/omarchy-openvpn-manager"
 
 [[bin]]
 name = "omarchy-openvpn-manager"

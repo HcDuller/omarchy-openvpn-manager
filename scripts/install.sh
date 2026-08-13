@@ -11,7 +11,7 @@
 set -euo pipefail
 
 APP_NAME="omarchy-openvpn-manager"
-REPO="your-org/omarchy-openvpn-manager" # TODO: update to the real GitHub org/repo
+REPO="HcDuller/omarchy-openvpn-manager"
 INSTALL_DIR="${HOME}/.local/share/${APP_NAME}"
 BIN_DIR="${HOME}/.local/bin"
 DESKTOP_DIR="${HOME}/.local/share/applications"

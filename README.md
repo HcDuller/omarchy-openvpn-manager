@@ -28,7 +28,7 @@ NetworkManager already understands — it does not reinvent VPN handling.
 ## Install
 
 ```sh
-git clone https://github.com/your-org/omarchy-openvpn-manager.git
+git clone https://github.com/HcDuller/omarchy-openvpn-manager.git
 cd omarchy-openvpn-manager
 ./scripts/install.sh
 ```

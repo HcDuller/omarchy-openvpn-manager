@@ -23,10 +23,14 @@ impl Tray for VpnTray {
     }
 
     fn icon_name(&self) -> String {
+        // Symbolic icon names are used here (rather than the unsuffixed
+        // variants) because Adwaita, the icon theme Omarchy/GTK4 apps
+        // assume as a baseline, only ships `-symbolic` VPN status icons.
+        // Symbolic icons also auto-adapt to light/dark tray backgrounds.
         if self.state.lock().unwrap().connected {
-            "network-vpn".into()
+            "network-vpn-symbolic".into()
         } else {
-            "network-vpn-disconnected".into()
+            "network-vpn-disconnected-symbolic".into()
         }
     }
 
