@@ -3,6 +3,8 @@
 
 use anyhow::{bail, Context, Result};
 use std::path::Path;
+use std::process::Stdio;
+use std::time::Duration;
 use tokio::process::Command;
 
 /// Connection state as reported by NetworkManager.
@@ -38,12 +40,40 @@ pub struct VpnProfile {
 
 const NMCLI: &str = "nmcli";
 
+/// Maximum time to wait for any single `nmcli` invocation before giving up.
+/// Prevents the UI from hanging forever if `nmcli`/NetworkManager is stuck
+/// (e.g. waiting on a polkit prompt that never appears).
+const COMMAND_TIMEOUT: Duration = Duration::from_secs(20);
+
 async fn run(args: &[&str]) -> Result<String> {
-    let output = Command::new(NMCLI)
+    eprintln!("[nm] running: nmcli {}", args.join(" "));
+
+    let child = Command::new(NMCLI)
         .args(args)
-        .output()
-        .await
-        .with_context(|| format!("failed to execute `nmcli {}`", args.join(" ")))?;
+        // Explicitly detach stdin so nmcli can never block waiting on
+        // interactive input (e.g. a secret prompt) when launched from a
+        // desktop entry with no attached terminal.
+        .stdin(Stdio::null())
+        .output();
+
+    let output = match tokio::time::timeout(COMMAND_TIMEOUT, child).await {
+        Ok(result) => {
+            result.with_context(|| format!("failed to execute `nmcli {}`", args.join(" ")))?
+        }
+        Err(_) => {
+            bail!(
+                "`nmcli {}` timed out after {:?}",
+                args.join(" "),
+                COMMAND_TIMEOUT
+            );
+        }
+    };
+
+    eprintln!(
+        "[nm] finished: nmcli {} -> status={:?}",
+        args.join(" "),
+        output.status.code()
+    );
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);

@@ -116,16 +116,25 @@ impl SimpleComponent for App {
     }
 
     fn update(&mut self, msg: Self::Input, sender: ComponentSender<Self>) {
+        eprintln!("[ui] update: {msg:?}");
         match msg {
             AppMsg::Refresh => {
                 self.status = "Loading profiles...".to_string();
                 let sender = sender.clone();
                 relm4::spawn(async move {
+                    eprintln!("[ui] Refresh task started");
                     let nm = NetworkManager::new();
                     let msg = match nm.list_profiles().await {
-                        Ok(profiles) => AppMsg::Refreshed(profiles),
-                        Err(err) => AppMsg::Error(format!("Failed to list profiles: {err:#}")),
+                        Ok(profiles) => {
+                            eprintln!("[ui] Refresh task got {} profiles", profiles.len());
+                            AppMsg::Refreshed(profiles)
+                        }
+                        Err(err) => {
+                            eprintln!("[ui] Refresh task failed: {err:#}");
+                            AppMsg::Error(format!("Failed to list profiles: {err:#}"))
+                        }
                     };
+                    eprintln!("[ui] Refresh task sending {msg:?}");
                     sender.input(msg);
                 });
             }
