@@ -119,12 +119,14 @@ impl SimpleComponent for App {
         match msg {
             AppMsg::Refresh => {
                 self.status = "Loading profiles...".to_string();
+                let sender = sender.clone();
                 relm4::spawn(async move {
                     let nm = NetworkManager::new();
-                    match nm.list_profiles().await {
+                    let msg = match nm.list_profiles().await {
                         Ok(profiles) => AppMsg::Refreshed(profiles),
                         Err(err) => AppMsg::Error(format!("Failed to list profiles: {err:#}")),
-                    }
+                    };
+                    sender.input(msg);
                 });
             }
             AppMsg::Refreshed(profiles) => {
@@ -169,9 +171,10 @@ impl SimpleComponent for App {
             AppMsg::Import(path) => {
                 self.status = "Importing profile...".to_string();
                 self.busy = true;
+                let sender = sender.clone();
                 relm4::spawn(async move {
                     let nm = NetworkManager::new();
-                    match nm.import_profile(&path).await {
+                    let msg = match nm.import_profile(&path).await {
                         Ok(_name) => {
                             let nm = NetworkManager::new();
                             match nm.list_profiles().await {
@@ -180,48 +183,55 @@ impl SimpleComponent for App {
                             }
                         }
                         Err(err) => AppMsg::Error(format!("Import failed: {err:#}")),
-                    }
+                    };
+                    sender.input(msg);
                 });
             }
             AppMsg::Connect(name) => {
                 self.status = format!("Connecting to {name}...");
                 self.busy = true;
+                let sender = sender.clone();
                 relm4::spawn(async move {
                     let nm = NetworkManager::new();
-                    if let Err(err) = nm.connect(&name).await {
-                        return AppMsg::Error(format!("Connect failed: {err:#}"));
-                    }
-                    match nm.list_profiles().await {
-                        Ok(profiles) => AppMsg::Refreshed(profiles),
-                        Err(err) => AppMsg::Error(format!("Failed to refresh: {err:#}")),
-                    }
+                    let msg = match nm.connect(&name).await {
+                        Err(err) => AppMsg::Error(format!("Connect failed: {err:#}")),
+                        Ok(()) => match nm.list_profiles().await {
+                            Ok(profiles) => AppMsg::Refreshed(profiles),
+                            Err(err) => AppMsg::Error(format!("Failed to refresh: {err:#}")),
+                        },
+                    };
+                    sender.input(msg);
                 });
             }
             AppMsg::Disconnect(name) => {
                 self.status = format!("Disconnecting {name}...");
                 self.busy = true;
+                let sender = sender.clone();
                 relm4::spawn(async move {
                     let nm = NetworkManager::new();
-                    if let Err(err) = nm.disconnect(&name).await {
-                        return AppMsg::Error(format!("Disconnect failed: {err:#}"));
-                    }
-                    match nm.list_profiles().await {
-                        Ok(profiles) => AppMsg::Refreshed(profiles),
-                        Err(err) => AppMsg::Error(format!("Failed to refresh: {err:#}")),
-                    }
+                    let msg = match nm.disconnect(&name).await {
+                        Err(err) => AppMsg::Error(format!("Disconnect failed: {err:#}")),
+                        Ok(()) => match nm.list_profiles().await {
+                            Ok(profiles) => AppMsg::Refreshed(profiles),
+                            Err(err) => AppMsg::Error(format!("Failed to refresh: {err:#}")),
+                        },
+                    };
+                    sender.input(msg);
                 });
             }
             AppMsg::Delete(name) => {
                 self.busy = true;
+                let sender = sender.clone();
                 relm4::spawn(async move {
                     let nm = NetworkManager::new();
-                    if let Err(err) = nm.delete_profile(&name).await {
-                        return AppMsg::Error(format!("Delete failed: {err:#}"));
-                    }
-                    match nm.list_profiles().await {
-                        Ok(profiles) => AppMsg::Refreshed(profiles),
-                        Err(err) => AppMsg::Error(format!("Failed to refresh: {err:#}")),
-                    }
+                    let msg = match nm.delete_profile(&name).await {
+                        Err(err) => AppMsg::Error(format!("Delete failed: {err:#}")),
+                        Ok(()) => match nm.list_profiles().await {
+                            Ok(profiles) => AppMsg::Refreshed(profiles),
+                            Err(err) => AppMsg::Error(format!("Failed to refresh: {err:#}")),
+                        },
+                    };
+                    sender.input(msg);
                 });
             }
             AppMsg::Error(message) => {
@@ -229,11 +239,6 @@ impl SimpleComponent for App {
                 self.busy = false;
             }
         }
-
-        // Rebuild the profile list rows. Doing this on every update keeps
-        // the implementation simple; for larger lists a `FactoryVecDeque`
-        // would be preferable.
-        let _ = sender;
     }
 
     fn post_view(&self) {
