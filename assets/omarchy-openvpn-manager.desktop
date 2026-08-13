@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=OpenVPN Manager
+Comment=Manage OpenVPN connections through NetworkManager
+Exec=omarchy-openvpn-manager
+Icon=omarchy-openvpn-manager
+Terminal=false
+Categories=Network;System;Settings;
+StartupWMClass=omarchy-openvpn-manager

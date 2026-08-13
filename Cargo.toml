@@ -1,0 +1,27 @@
+[package]
+name = "omarchy-openvpn-manager"
+version = "0.1.0"
+edition = "2021"
+description = "GTK4/Libadwaita OpenVPN connection manager for Omarchy, using NetworkManager"
+license = "MIT"
+repository = "https://github.com/your-org/omarchy-openvpn-manager"
+
+[[bin]]
+name = "omarchy-openvpn-manager"
+path = "src/main.rs"
+
+[dependencies]
+relm4 = { version = "0.11", features = ["libadwaita"] }
+gtk = { version = "0.11", package = "gtk4" }
+zbus = "5"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "sync"] }
+futures-util = "0.3"
+ksni = "0.3"
+anyhow = "1"
+thiserror = "2"
+serde = { version = "1", features = ["derive"] }
+
+[profile.release]
+lto = true
+strip = true
+opt-level = "z"
