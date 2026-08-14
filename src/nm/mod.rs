@@ -10,7 +10,7 @@ pub mod watcher;
 
 #[allow(unused_imports)]
 // ConnectionState is reserved for future fine-grained status reporting
-pub use cli::{ConnectionState, VpnConnectionDetails, VpnProfile};
+pub use cli::{normalized_protocol, ConnectionState, VpnConnectionDetails, VpnProfile};
 
 use anyhow::Result;
 use std::path::Path;
@@ -67,19 +67,11 @@ impl NetworkManager {
         cli::set_vpn_username(name, username).await
     }
 
-    /// Set the remote server address.
+    /// Set the remote server: NetworkManager-openvpn packs address, port,
+    /// and protocol into a single `host:port:proto` value, so this takes
+    /// the fully-combined string rather than separate fields.
     pub async fn set_remote(&self, name: &str, remote: &str) -> Result<()> {
         cli::set_vpn_remote(name, remote).await
-    }
-
-    /// Set the remote server port.
-    pub async fn set_port(&self, name: &str, port: &str) -> Result<()> {
-        cli::set_vpn_port(name, port).await
-    }
-
-    /// Set the transport protocol (TCP if `true`, UDP if `false`).
-    pub async fn set_protocol_tcp(&self, name: &str, is_tcp: bool) -> Result<()> {
-        cli::set_vpn_protocol_tcp(name, is_tcp).await
     }
 
     /// Set the data cipher.

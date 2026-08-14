@@ -174,14 +174,29 @@ pub struct VpnConnectionDetails {
     /// plain `.ovpn` import, since `auth-user-pass` files don't usually
     /// carry the username itself).
     pub username: Option<String>,
-    /// Remote server address, if parseable.
+    /// Remote server address, parsed from the first entry of the `remote`
+    /// sub-key (which packs `host:port:proto` per entry, comma-separated
+    /// if there are multiple failover remotes).
     pub remote: Option<String>,
-    /// Remote server port, if parseable.
+    /// Remote server port, parsed from the same entry as `remote`.
     pub port: Option<String>,
-    /// Transport protocol, either "tcp" or "udp", if parseable.
+    /// Transport protocol as NetworkManager-openvpn stores it verbatim
+    /// (e.g. "udp4", "tcp4", "udp6", "tcp"), parsed from the same entry as
+    /// `remote`. Use [`normalized_protocol`] to get a plain "udp"/"tcp" for
+    /// display/comparison purposes.
     pub protocol: Option<String>,
     /// Data cipher, if parseable.
     pub cipher: Option<String>,
+}
+
+/// Reduces a raw protocol string like "udp4"/"tcp6" to a plain "udp"/"tcp"
+/// for dropdown selection and change comparisons, defaulting to "udp" if
+/// unparseable.
+pub fn normalized_protocol(protocol: Option<&str>) -> &'static str {
+    match protocol {
+        Some(p) if p.starts_with("tcp") => "tcp",
+        _ => "udp",
+    }
 }
 
 /// Parse the `vpn.data` map property of a connection to determine whether
@@ -202,34 +217,96 @@ pub async fn get_connection_details(name: &str) -> Result<VpnConnectionDetails> 
         .map(|v| v == "password" || v == "password-tls")
         .unwrap_or(false);
 
-    let protocol = data.get("proto-tcp").map(|v| {
-        if v == "yes" {
-            "tcp".to_string()
-        } else {
-            "udp".to_string()
+    // NetworkManager-openvpn stores each remote as "host:port:proto",
+    // joined by ", " when there are multiple (e.g. this .ovpn's two
+    // `remote` lines for failover). We only surface the first one for
+    // editing; if the user doesn't touch the remote/port fields, the
+    // original (possibly multi-remote) value is left untouched entirely
+    // thanks to the non-empty-if-changed guard callers apply.
+    let first_remote = data
+        .get("remote")
+        .and_then(|v| v.split(", ").next())
+        .map(str::to_string);
+    let (remote, port, protocol) = match &first_remote {
+        Some(entry) => {
+            let mut parts = entry.splitn(3, ':');
+            let host = parts.next().map(str::to_string);
+            let port = parts.next().map(str::to_string);
+            let proto = parts.next().map(str::to_string);
+            (host, port, proto)
         }
-    });
+        None => (None, None, None),
+    };
 
     Ok(VpnConnectionDetails {
         needs_auth,
         username: data.get("username").cloned(),
-        remote: data.get("remote").cloned(),
-        port: data.get("port").cloned(),
+        remote,
+        port,
         protocol,
         cipher: data.get("cipher").cloned(),
     })
 }
 
 /// Parses nmcli's `key1 = value1, key2 = value2` map property format into a
-/// lookup table. Does not attempt to handle escaped commas within values.
+/// lookup table, correctly handling nmcli's backslash-escaping of literal
+/// `,`, `:`, and `\` characters within values (e.g. this plugin's `remote`
+/// value embeds `:` inside each entry and separates multiple entries with
+/// an escaped `,` so it isn't confused with the outer map's own `, `
+/// separator between different keys).
 fn parse_vpn_data(raw: &str) -> HashMap<String, String> {
-    raw.trim()
-        .split(", ")
-        .filter_map(|pair| {
-            let (key, value) = pair.split_once(" = ")?;
-            Some((key.trim().to_string(), value.trim().to_string()))
-        })
-        .collect()
+    let mut result = HashMap::new();
+    let mut chars = raw.trim().chars().peekable();
+
+    loop {
+        // Parse the key: read up to an unescaped " = ".
+        let mut key = String::new();
+        loop {
+            match chars.next() {
+                None => return result,
+                Some('\\') => {
+                    if let Some(c) = chars.next() {
+                        key.push(c);
+                    }
+                }
+                Some(' ') if chars.peek() == Some(&'=') => {
+                    chars.next(); // consume '='
+                    if chars.peek() == Some(&' ') {
+                        chars.next(); // consume the space after '='
+                    }
+                    break;
+                }
+                Some(c) => key.push(c),
+            }
+        }
+
+        // Parse the value: read up to an unescaped ", " or end of input.
+        let mut value = String::new();
+        let mut ended = false;
+        loop {
+            match chars.next() {
+                None => {
+                    ended = true;
+                    break;
+                }
+                Some('\\') => {
+                    if let Some(c) = chars.next() {
+                        value.push(c);
+                    }
+                }
+                Some(',') if chars.peek() == Some(&' ') => {
+                    chars.next(); // consume the space after ','
+                    break;
+                }
+                Some(c) => value.push(c),
+            }
+        }
+
+        result.insert(key.trim().to_string(), value);
+        if ended {
+            return result;
+        }
+    }
 }
 
 /// Sets the `username` sub-key of a connection's `vpn.data` map, without
@@ -238,19 +315,14 @@ pub async fn set_vpn_username(name: &str, username: &str) -> Result<()> {
     set_vpn_data_key(name, "username", username).await
 }
 
-/// Sets the `remote` sub-key (server address).
+/// Sets the `remote` sub-key. NetworkManager-openvpn packs server address,
+/// port, and protocol into a single `host:port:proto` value (e.g.
+/// `45.236.52.35:1194:udp4`), so host/port/protocol edits must all be
+/// reconstructed into this one combined string rather than set
+/// independently. This intentionally replaces any additional
+/// failover remotes the original connection had.
 pub async fn set_vpn_remote(name: &str, remote: &str) -> Result<()> {
     set_vpn_data_key(name, "remote", remote).await
-}
-
-/// Sets the `port` sub-key.
-pub async fn set_vpn_port(name: &str, port: &str) -> Result<()> {
-    set_vpn_data_key(name, "port", port).await
-}
-
-/// Sets the transport protocol: `true` for TCP, `false` for UDP.
-pub async fn set_vpn_protocol_tcp(name: &str, is_tcp: bool) -> Result<()> {
-    set_vpn_data_key(name, "proto-tcp", if is_tcp { "yes" } else { "no" }).await
 }
 
 /// Sets the `cipher` sub-key.
@@ -287,4 +359,58 @@ fn split_nmcli_fields(line: &str) -> Vec<&str> {
     // consume (NAME, UUID, TYPE, ACTIVE) this naive split is sufficient for
     // the common case; a fully correct unescaper would walk char-by-char.
     line.split(':').collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Regression test for a real-world `nmcli -g vpn.data connection show`
+    /// output: two failover `remote` entries (each `host:port:proto`)
+    /// joined by an escaped comma, plus other keys. Before the escape-aware
+    /// rewrite, the naive `split(", ")` parser would incorrectly split on
+    /// the escaped `\, ` too, corrupting the `remote` value and silently
+    /// dropping the second entry.
+    #[test]
+    fn parses_multi_remote_with_escaped_separators() {
+        let raw = r"connection-type = password-tls, remote = 45.236.52.35\:1194\:udp4\, 45.236.52.90\:1194\:udp4, cipher = AES-256-GCM, password-flags = 1";
+
+        let data = parse_vpn_data(raw);
+
+        assert_eq!(
+            data.get("connection-type").map(String::as_str),
+            Some("password-tls")
+        );
+        assert_eq!(
+            data.get("remote").map(String::as_str),
+            Some("45.236.52.35:1194:udp4, 45.236.52.90:1194:udp4")
+        );
+        assert_eq!(data.get("cipher").map(String::as_str), Some("AES-256-GCM"));
+        assert_eq!(data.get("password-flags").map(String::as_str), Some("1"));
+    }
+
+    #[test]
+    fn connection_details_splits_first_remote_into_host_port_protocol() {
+        let raw = r"connection-type = password-tls, remote = 45.236.52.35\:1194\:udp4\, 45.236.52.90\:1194\:udp4, cipher = AES-256-GCM";
+        let data = parse_vpn_data(raw);
+
+        let first_remote = data
+            .get("remote")
+            .and_then(|v| v.split(", ").next())
+            .map(str::to_string);
+        assert_eq!(first_remote.as_deref(), Some("45.236.52.35:1194:udp4"));
+
+        let mut parts = first_remote.as_deref().unwrap().splitn(3, ':');
+        assert_eq!(parts.next(), Some("45.236.52.35"));
+        assert_eq!(parts.next(), Some("1194"));
+        assert_eq!(parts.next(), Some("udp4"));
+    }
+
+    #[test]
+    fn normalized_protocol_strips_ip_version_suffix() {
+        assert_eq!(normalized_protocol(Some("udp4")), "udp");
+        assert_eq!(normalized_protocol(Some("tcp6")), "tcp");
+        assert_eq!(normalized_protocol(Some("tcp")), "tcp");
+        assert_eq!(normalized_protocol(None), "udp");
+    }
 }

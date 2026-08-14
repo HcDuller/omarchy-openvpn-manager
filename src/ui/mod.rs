@@ -2,7 +2,7 @@
 //! importing new `.ovpn` files, connecting/disconnecting, and shows the
 //! current connection status.
 
-use crate::nm::{NetworkManager, VpnProfile};
+use crate::nm::{normalized_protocol, NetworkManager, VpnProfile};
 use crate::secrets;
 use gtk::prelude::*;
 use relm4::prelude::*;
@@ -38,20 +38,33 @@ pub enum AppMsg {
     /// User submitted edited properties from the edit dialog. Each field is
     /// `Some` only if the user actually changed it from its pre-filled
     /// value, so unparsed/unknown original values are left untouched
-    /// rather than being clobbered with a blank.
+    /// rather than being clobbered with a blank. `remote` is the fully
+    /// reconstructed `host:port:proto` value (NetworkManager-openvpn packs
+    /// all three into a single `vpn.data` key), set if the user changed
+    /// any of the host/port/protocol fields.
     SaveCredentials {
         name: String,
         uuid: String,
         username: Option<String>,
         password: Option<String>,
         remote: Option<String>,
-        port: Option<String>,
-        protocol_tcp: Option<bool>,
         cipher: Option<String>,
     },
     /// An async action reported an error to surface in the status label.
     Error(String),
 }
+
+/// Ciphers commonly supported by OpenVPN/NetworkManager-openvpn, offered as
+/// a constrained dropdown rather than freeform text to avoid typos.
+const KNOWN_CIPHERS: &[(&str, &str)] = &[
+    ("", "Default (negotiated)"),
+    ("AES-256-GCM", "AES-256-GCM"),
+    ("AES-128-GCM", "AES-128-GCM"),
+    ("CHACHA20-POLY1305", "CHACHA20-POLY1305"),
+    ("AES-256-CBC", "AES-256-CBC"),
+    ("AES-128-CBC", "AES-128-CBC"),
+    ("BF-CBC", "BF-CBC (legacy)"),
+];
 
 #[relm4::component(pub)]
 impl SimpleComponent for App {
@@ -345,20 +358,35 @@ impl SimpleComponent for App {
                     content.append(&field_label("Port"));
                     content.append(&port_entry);
 
+                    let original_protocol_norm = normalized_protocol(details.protocol.as_deref());
                     let protocol_combo = gtk::ComboBoxText::new();
                     protocol_combo.append(Some("udp"), "UDP");
                     protocol_combo.append(Some("tcp"), "TCP");
-                    protocol_combo
-                        .set_active_id(Some(details.protocol.as_deref().unwrap_or("udp")));
+                    protocol_combo.set_active_id(Some(original_protocol_norm));
                     content.append(&field_label("Protocol"));
                     content.append(&protocol_combo);
 
-                    let cipher_entry = gtk::Entry::builder()
-                        .placeholder_text("Cipher (e.g. AES-256-GCM)")
-                        .text(details.cipher.as_deref().unwrap_or(""))
-                        .build();
+                    let cipher_combo = gtk::ComboBoxText::new();
+                    for (id, label) in KNOWN_CIPHERS {
+                        cipher_combo.append(Some(id), label);
+                    }
+                    let original_cipher = details.cipher.clone().unwrap_or_default();
+                    let matched_known_cipher = cipher_combo.set_active_id(Some(&original_cipher));
+                    // If the connection's actual cipher isn't one of our
+                    // known dropdown options (e.g. unparsed, or a cipher
+                    // we don't list), fall back to showing "Default"
+                    // rather than silently picking one - but remember that
+                    // fallback as the baseline for change detection, so we
+                    // only rewrite the cipher if the user actually touches
+                    // the dropdown, not just because it didn't match.
+                    let baseline_cipher_id = if matched_known_cipher {
+                        original_cipher.clone()
+                    } else {
+                        cipher_combo.set_active_id(Some(""));
+                        String::new()
+                    };
                     content.append(&field_label("Cipher"));
-                    content.append(&cipher_entry);
+                    content.append(&cipher_combo);
 
                     let name_for_response = name.clone();
                     let uuid_for_response = uuid.clone();
@@ -381,22 +409,57 @@ impl SimpleComponent for App {
                                     Some(text.to_string())
                                 }
                             };
-                            let remote = non_empty_if_changed(
-                                remote_entry.text().as_str(),
-                                original.remote.as_deref(),
-                            );
-                            let port = non_empty_if_changed(
-                                port_entry.text().as_str(),
-                                original.port.as_deref(),
-                            );
-                            let cipher = non_empty_if_changed(
-                                cipher_entry.text().as_str(),
-                                original.cipher.as_deref(),
-                            );
-                            let protocol_tcp = protocol_combo.active_id().and_then(|id| {
-                                let new_is_tcp = id == "tcp";
-                                let original_is_tcp = original.protocol.as_deref() == Some("tcp");
-                                (new_is_tcp != original_is_tcp).then_some(new_is_tcp)
+
+                            // NetworkManager-openvpn packs host/port/proto
+                            // into a single `remote` value, so any change
+                            // to host, port, or protocol requires
+                            // reconstructing and rewriting the whole thing.
+                            let new_host = remote_entry.text();
+                            let new_port = port_entry.text();
+                            let new_protocol_norm = protocol_combo
+                                .active_id()
+                                .map(|id| id.to_string())
+                                .unwrap_or_else(|| "udp".to_string());
+
+                            let host_changed = !new_host.is_empty()
+                                && original.remote.as_deref() != Some(new_host.as_str());
+                            let port_changed = !new_port.is_empty()
+                                && original.port.as_deref() != Some(new_port.as_str());
+                            let protocol_changed = new_protocol_norm != original_protocol_norm;
+
+                            let remote = if host_changed || port_changed || protocol_changed {
+                                let host = if new_host.is_empty() {
+                                    original.remote.clone().unwrap_or_default()
+                                } else {
+                                    new_host.to_string()
+                                };
+                                let port = if new_port.is_empty() {
+                                    original.port.clone().unwrap_or_default()
+                                } else {
+                                    new_port.to_string()
+                                };
+                                // Preserve the original protocol string
+                                // verbatim (e.g. "udp4") unless the user
+                                // actually changed the dropdown selection.
+                                let proto = if protocol_changed {
+                                    new_protocol_norm.clone()
+                                } else {
+                                    original
+                                        .protocol
+                                        .clone()
+                                        .unwrap_or_else(|| original_protocol_norm.to_string())
+                                };
+                                Some(format!("{host}:{port}:{proto}"))
+                            } else {
+                                None
+                            };
+
+                            let cipher = cipher_combo.active_id().and_then(|id| {
+                                if id.as_str() == baseline_cipher_id {
+                                    None
+                                } else {
+                                    Some(id.to_string())
+                                }
                             });
 
                             sender.input(AppMsg::SaveCredentials {
@@ -405,8 +468,6 @@ impl SimpleComponent for App {
                                 username,
                                 password,
                                 remote,
-                                port,
-                                protocol_tcp,
                                 cipher,
                             });
                         }
@@ -421,8 +482,6 @@ impl SimpleComponent for App {
                 username,
                 password,
                 remote,
-                port,
-                protocol_tcp,
                 cipher,
             } => {
                 self.status = "Saving connection settings...".to_string();
@@ -437,14 +496,8 @@ impl SimpleComponent for App {
                         if let Some(remote) = &remote {
                             nm.set_remote(&name, remote).await?;
                         }
-                        if let Some(port) = &port {
-                            nm.set_port(&name, port).await?;
-                        }
                         if let Some(cipher) = &cipher {
                             nm.set_cipher(&name, cipher).await?;
-                        }
-                        if let Some(is_tcp) = protocol_tcp {
-                            nm.set_protocol_tcp(&name, is_tcp).await?;
                         }
                         if let Some(password) = &password {
                             nm.mark_password_agent_owned(&name).await?;
