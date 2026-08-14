@@ -4,9 +4,12 @@ A GTK4 / Libadwaita OpenVPN connection manager for [Omarchy](https://omarchy.org
 built on top of NetworkManager (`nmcli`) with a tray icon and optional waybar
 integration.
 
-Omarchy already uses NetworkManager as its network stack (not `systemd-networkd`),
-so this tool is a thin, native-feeling GUI on top of the connection profiles
-NetworkManager already understands — it does not reinvent VPN handling.
+Omarchy's current default network stack is NetworkManager, but older
+installs (or systems provisioned via archinstall's "copy ISO network" mode)
+may still be running `systemd-networkd` + `iwd`. Since this tool requires
+NetworkManager, `install.sh` detects that case and offers to migrate for you
+(see [Network stack migration](#network-stack-migration-systemd-networkd--networkmanager)
+below).
 
 ## Features
 
@@ -45,6 +48,35 @@ The installer will:
 4. Install a desktop entry and icon so the app shows up in your launcher
 
 Make sure `~/.local/bin` is on your `PATH`.
+
+## Network stack migration (systemd-networkd → NetworkManager)
+
+This tool requires NetworkManager to be the active network stack, since it
+drives everything through `nmcli`. If `install.sh` detects that your system
+is still running `systemd-networkd` (common on older Omarchy installs or
+archinstall's "copy ISO network" mode) instead of NetworkManager, it will:
+
+1. Explain that switching also enables other Omarchy features that assume
+   NetworkManager (the top-bar network panel, `omarchy network`/`omarchy-dns`
+   commands, Wi-Fi QR sharing, Wi-Fi band pinning) — not just this app
+2. Ask for explicit confirmation before changing anything
+3. If confirmed, perform the same migration Omarchy's own internal upgrade
+   path uses: enable NetworkManager, confirm it's actually carrying the
+   network link, then disable/mask `systemd-networkd`/`iwd`, back up any
+   stock `.network` files it finds under `/etc/systemd/network/`, and
+   restart `systemd-resolved`
+4. Record whether it performed this migration in
+   `~/.local/share/omarchy-openvpn-manager/network-migration-state.json`
+
+If NetworkManager is already active (the common case on current Omarchy
+installs), none of this runs — install proceeds normally.
+
+**Uninstalling**: `uninstall.sh` checks that state file. If `install.sh`
+performed the migration, it will ask (again, with an explicit warning about
+the other Omarchy features that may now depend on NetworkManager) whether you
+want to revert back to `systemd-networkd`. If you decline, or if
+NetworkManager was already active before you installed this app,
+`uninstall.sh` leaves your network stack untouched.
 
 ## Uninstall
 

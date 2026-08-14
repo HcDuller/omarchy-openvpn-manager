@@ -16,6 +16,7 @@ INSTALL_DIR="${HOME}/.local/share/${APP_NAME}"
 BIN_DIR="${HOME}/.local/bin"
 DESKTOP_DIR="${HOME}/.local/share/applications"
 ICON_DIR="${HOME}/.local/share/icons/hicolor/scalable/apps"
+NETWORK_STATE_FILE="${INSTALL_DIR}/network-migration-state.json"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
@@ -54,6 +55,125 @@ detect_arch_triple() {
     aarch64) echo "aarch64-unknown-linux-gnu" ;;
     *) echo "" ;;
   esac
+}
+
+# --- Network stack migration (systemd-networkd -> NetworkManager) ---
+#
+# Older Omarchy installs (and archinstall's "copy ISO network" mode) default
+# to systemd-networkd + iwd. This tool requires NetworkManager (via nmcli),
+# so if networkd is what's actually running, offer to migrate using the same
+# approach Omarchy's own upgrade migration uses, and record whether we did so
+# in a state file so uninstall.sh can offer to revert it later.
+
+networkd_units=(
+  systemd-networkd.service
+  systemd-networkd.socket
+  systemd-networkd-varlink.socket
+  systemd-networkd-varlink-metrics.socket
+  systemd-networkd-resolve-hook.socket
+)
+
+is_networkd_active() {
+  systemctl is-active --quiet systemd-networkd.service 2>/dev/null
+}
+
+is_networkmanager_active() {
+  systemctl is-active --quiet NetworkManager.service 2>/dev/null
+}
+
+write_network_state() {
+  local migrated="$1"
+  local networkd_was_active="$2"
+  local backup_dir="${3:-}"
+  mkdir -p "${INSTALL_DIR}"
+  cat > "${NETWORK_STATE_FILE}" <<EOF
+{
+  "migrated_by_installer": ${migrated},
+  "networkd_was_active": ${networkd_was_active},
+  "backup_dir": "${backup_dir}"
+}
+EOF
+}
+
+stock_networkd_file() {
+  local file="$1"
+  [ -f "$file" ] || return 1
+  case "$(basename "$file")" in
+    20-ethernet.network | 20-wlan.network | 20-wwan.network) ;;
+    *) return 1 ;;
+  esac
+  grep -Eq '^[[:space:]]*DHCP=yes[[:space:]]*$' "$file" || return 1
+  grep -Eq '^[[:space:]]*Name=(en\*|eth\*|wl\*|ww\*)[[:space:]]*$' "$file" || return 1
+}
+
+backup_stock_networkd_files() {
+  local backup_dir="$1"
+  local file
+  for file in /etc/systemd/network/20-ethernet.network \
+    /etc/systemd/network/20-wlan.network \
+    /etc/systemd/network/20-wwan.network; do
+    if stock_networkd_file "$file"; then
+      sudo install -d -m 0755 "$backup_dir"
+      sudo mv "$file" "$backup_dir/"
+    fi
+  done
+}
+
+maybe_migrate_networkd() {
+  if is_networkmanager_active; then
+    log "NetworkManager is already active; no network stack migration needed."
+    write_network_state "false" "false" ""
+    return
+  fi
+
+  if ! is_networkd_active; then
+    # Neither is active/detected in a way we can confirm; NetworkManager was
+    # just installed above and will be enabled normally by systemd on next
+    # boot/login. Nothing to migrate away from.
+    write_network_state "false" "false" ""
+    return
+  fi
+
+  warn "This system is currently using systemd-networkd, but ${APP_NAME} requires NetworkManager."
+  warn "Switching to NetworkManager also enables other Omarchy features that assume it,"
+  warn "such as the top-bar network panel, 'omarchy network'/'omarchy-dns' commands, and Wi-Fi QR sharing."
+  read -r -p "Switch this system from systemd-networkd to NetworkManager now? [y/N] " reply
+  case "$reply" in
+    [yY] | [yY][eE][sS]) ;;
+    *)
+      err "Cannot continue without NetworkManager. Aborting install."
+      exit 1
+      ;;
+  esac
+
+  log "Enabling NetworkManager..."
+  sudo systemctl enable --now NetworkManager.service
+
+  if ! is_networkmanager_active; then
+    err "NetworkManager did not come up successfully; aborting before touching networkd."
+    exit 1
+  fi
+
+  log "NetworkManager is carrying the link; retiring systemd-networkd..."
+  local backup_dir
+  backup_dir="/etc/systemd/network/omarchy-networkd-retired-$(date +%Y%m%d%H%M%S)"
+
+  local unit
+  for unit in "${networkd_units[@]}"; do
+    sudo systemctl disable --now "$unit" >/dev/null 2>&1 || true
+  done
+  sudo systemctl disable systemd-networkd-wait-online.service >/dev/null 2>&1 || true
+  sudo systemctl mask systemd-networkd-wait-online.service >/dev/null 2>&1 || true
+  sudo systemctl disable --now iwd.service >/dev/null 2>&1 || true
+
+  backup_stock_networkd_files "$backup_dir"
+
+  sudo systemctl stop systemd-networkd.service >/dev/null 2>&1 || true
+  sudo systemctl reload NetworkManager.service >/dev/null 2>&1 || true
+  sudo systemctl restart systemd-resolved.service >/dev/null 2>&1 || true
+
+  log "Migrated from systemd-networkd to NetworkManager (backup: ${backup_dir})."
+  write_network_state "true" "true" "$backup_dir"
 }
 
 fetch_prebuilt_binary() {
@@ -139,6 +259,7 @@ link_binary() {
 main() {
   require_arch
   install_dependencies
+  maybe_migrate_networkd
   install_binary
   link_binary
   install_desktop_entry

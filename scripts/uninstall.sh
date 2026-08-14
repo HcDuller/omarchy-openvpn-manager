@@ -13,8 +13,10 @@ INSTALL_DIR="${HOME}/.local/share/${APP_NAME}"
 BIN_DIR="${HOME}/.local/bin"
 DESKTOP_DIR="${HOME}/.local/share/applications"
 ICON_DIR="${HOME}/.local/share/icons/hicolor/scalable/apps"
+NETWORK_STATE_FILE="${INSTALL_DIR}/network-migration-state.json"
 
 log() { printf '\033[1;34m[uninstall]\033[0m %s\n' "$1"; }
+warn() { printf '\033[1;33m[uninstall]\033[0m %s\n' "$1" >&2; }
 
 remove_path() {
   local path="$1"
@@ -24,7 +26,66 @@ remove_path() {
   fi
 }
 
+# Reads a boolean or string field out of the simple, fixed-format JSON written
+# by install.sh's write_network_state(). Not a general JSON parser.
+read_json_field() {
+  local file="$1"
+  local field="$2"
+  grep -oP "\"${field}\"\s*:\s*\"?\K[^,\"\n}]+" "$file" 2>/dev/null | head -n1
+}
+
+maybe_revert_networkd() {
+  [ -f "${NETWORK_STATE_FILE}" ] || return 0
+
+  local migrated
+  migrated="$(read_json_field "${NETWORK_STATE_FILE}" migrated_by_installer)"
+  if [ "$migrated" != "true" ]; then
+    return 0
+  fi
+
+  local backup_dir
+  backup_dir="$(read_json_field "${NETWORK_STATE_FILE}" backup_dir)"
+
+  warn "This installer previously switched your system from systemd-networkd to NetworkManager."
+  warn "Other Omarchy features (the top-bar network panel, 'omarchy network'/'omarchy-dns' commands,"
+  warn "Wi-Fi QR sharing, band pinning) may now depend on NetworkManager if you've used them since."
+  warn "Reverting to systemd-networkd could break those features."
+  read -r -p "Revert this system back to systemd-networkd now? [y/N] " reply
+  case "$reply" in
+    [yY] | [yY][eE][sS]) ;;
+    *)
+      log "Leaving NetworkManager in place."
+      return 0
+      ;;
+  esac
+
+  log "Reverting to systemd-networkd..."
+  sudo systemctl enable --now iwd.service >/dev/null 2>&1 || true
+  sudo systemctl unmask systemd-networkd-wait-online.service >/dev/null 2>&1 || true
+  sudo systemctl enable systemd-networkd-wait-online.service >/dev/null 2>&1 || true
+
+  local unit
+  for unit in systemd-networkd.service systemd-networkd.socket \
+    systemd-networkd-varlink.socket systemd-networkd-varlink-metrics.socket \
+    systemd-networkd-resolve-hook.socket; do
+    sudo systemctl enable --now "$unit" >/dev/null 2>&1 || true
+  done
+
+  if [ -n "$backup_dir" ] && [ -d "$backup_dir" ]; then
+    log "Restoring backed-up networkd config from ${backup_dir}..."
+    sudo cp -a "${backup_dir}/." /etc/systemd/network/ 2>/dev/null || true
+  fi
+
+  sudo systemctl disable --now NetworkManager.service >/dev/null 2>&1 || true
+  sudo systemctl restart systemd-networkd.service >/dev/null 2>&1 || true
+  sudo systemctl restart systemd-resolved.service >/dev/null 2>&1 || true
+
+  log "Reverted to systemd-networkd."
+}
+
 main() {
+  maybe_revert_networkd
+
   remove_path "${BIN_DIR}/${APP_NAME}"
   remove_path "${INSTALL_DIR}"
   remove_path "${DESKTOP_DIR}/${APP_NAME}.desktop"
