@@ -33,14 +33,21 @@ pub enum AppMsg {
     Delete(String),
     /// Open the GTK file chooser to pick a `.ovpn` file.
     OpenImportDialog,
-    /// User asked to edit the credentials of an existing profile.
+    /// User asked to edit the credentials/properties of an existing profile.
     OpenEditDialog { name: String, uuid: String },
-    /// User submitted new credentials from the edit dialog.
+    /// User submitted edited properties from the edit dialog. Each field is
+    /// `Some` only if the user actually changed it from its pre-filled
+    /// value, so unparsed/unknown original values are left untouched
+    /// rather than being clobbered with a blank.
     SaveCredentials {
         name: String,
         uuid: String,
-        username: String,
-        password: String,
+        username: Option<String>,
+        password: Option<String>,
+        remote: Option<String>,
+        port: Option<String>,
+        protocol_tcp: Option<bool>,
+        cipher: Option<String>,
     },
     /// An async action reported an error to surface in the status label.
     Error(String),
@@ -193,17 +200,41 @@ impl SimpleComponent for App {
                 let sender = sender.clone();
                 relm4::spawn(async move {
                     let nm = NetworkManager::new();
-                    let msg = match nm.import_profile(&path).await {
-                        Ok(_name) => {
-                            let nm = NetworkManager::new();
-                            match nm.list_profiles().await {
-                                Ok(profiles) => AppMsg::Refreshed(profiles),
-                                Err(err) => AppMsg::Error(format!("Failed to refresh: {err:#}")),
+                    match nm.import_profile(&path).await {
+                        Ok(name) => {
+                            let profiles = match nm.list_profiles().await {
+                                Ok(profiles) => profiles,
+                                Err(err) => {
+                                    sender.input(AppMsg::Error(format!(
+                                        "Failed to refresh: {err:#}"
+                                    )));
+                                    return;
+                                }
+                            };
+
+                            let uuid = profiles
+                                .iter()
+                                .find(|p| p.name == name)
+                                .map(|p| p.uuid.clone());
+
+                            sender.input(AppMsg::Refreshed(profiles));
+
+                            // If the imported profile needs a username/password,
+                            // open the edit dialog automatically so the user
+                            // isn't left with a profile that will fail to
+                            // connect until they discover the Edit button.
+                            if let Some(uuid) = uuid {
+                                if let Ok(details) = nm.connection_details(&name).await {
+                                    if details.needs_auth {
+                                        sender.input(AppMsg::OpenEditDialog { name, uuid });
+                                    }
+                                }
                             }
                         }
-                        Err(err) => AppMsg::Error(format!("Import failed: {err:#}")),
-                    };
-                    sender.input(msg);
+                        Err(err) => {
+                            sender.input(AppMsg::Error(format!("Import failed: {err:#}")));
+                        }
+                    }
                 });
             }
             AppMsg::Connect(name) => {
@@ -257,15 +288,10 @@ impl SimpleComponent for App {
                 let sender = sender.clone();
                 relm4::spawn_local(async move {
                     let nm = NetworkManager::new();
-                    let existing_username = nm
-                        .connection_details(&name)
-                        .await
-                        .ok()
-                        .and_then(|details| details.username)
-                        .unwrap_or_default();
+                    let details = nm.connection_details(&name).await.unwrap_or_default();
 
                     let dialog = gtk::Dialog::with_buttons(
-                        Some(&format!("Edit credentials: {name}")),
+                        Some(&format!("Edit connection: {name}")),
                         None::<&gtk::Window>,
                         gtk::DialogFlags::MODAL,
                         &[
@@ -282,39 +308,106 @@ impl SimpleComponent for App {
                     content.set_margin_start(12);
                     content.set_margin_end(12);
 
+                    let field_label = |text: &str| {
+                        gtk::Label::builder()
+                            .label(text)
+                            .halign(gtk::Align::Start)
+                            .build()
+                    };
+
                     let username_entry = gtk::Entry::builder()
                         .placeholder_text("Username")
-                        .text(&existing_username)
+                        .text(details.username.as_deref().unwrap_or(""))
                         .build();
-                    content.append(
-                        &gtk::Label::builder()
-                            .label("Username")
-                            .halign(gtk::Align::Start)
-                            .build(),
-                    );
+                    content.append(&field_label("Username"));
                     content.append(&username_entry);
 
                     let password_entry = gtk::PasswordEntry::builder()
-                        .placeholder_text("Password")
+                        .placeholder_text("Leave blank to keep current password")
                         .show_peek_icon(true)
                         .build();
-                    content.append(
-                        &gtk::Label::builder()
-                            .label("Password")
-                            .halign(gtk::Align::Start)
-                            .build(),
-                    );
+                    content.append(&field_label("Password"));
                     content.append(&password_entry);
+
+                    content.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
+
+                    let remote_entry = gtk::Entry::builder()
+                        .placeholder_text("Server address")
+                        .text(details.remote.as_deref().unwrap_or(""))
+                        .build();
+                    content.append(&field_label("Remote server"));
+                    content.append(&remote_entry);
+
+                    let port_entry = gtk::Entry::builder()
+                        .placeholder_text("Port")
+                        .text(details.port.as_deref().unwrap_or(""))
+                        .build();
+                    content.append(&field_label("Port"));
+                    content.append(&port_entry);
+
+                    let protocol_combo = gtk::ComboBoxText::new();
+                    protocol_combo.append(Some("udp"), "UDP");
+                    protocol_combo.append(Some("tcp"), "TCP");
+                    protocol_combo
+                        .set_active_id(Some(details.protocol.as_deref().unwrap_or("udp")));
+                    content.append(&field_label("Protocol"));
+                    content.append(&protocol_combo);
+
+                    let cipher_entry = gtk::Entry::builder()
+                        .placeholder_text("Cipher (e.g. AES-256-GCM)")
+                        .text(details.cipher.as_deref().unwrap_or(""))
+                        .build();
+                    content.append(&field_label("Cipher"));
+                    content.append(&cipher_entry);
 
                     let name_for_response = name.clone();
                     let uuid_for_response = uuid.clone();
+                    let original = details.clone();
                     dialog.connect_response(move |dialog, response| {
                         if response == gtk::ResponseType::Accept {
+                            // Only report fields that actually changed from
+                            // their pre-filled value, so anything we failed
+                            // to parse (and thus left blank) doesn't get
+                            // clobbered on save.
+                            let username = non_empty_if_changed(
+                                username_entry.text().as_str(),
+                                original.username.as_deref(),
+                            );
+                            let password = {
+                                let text = password_entry.text();
+                                if text.is_empty() {
+                                    None
+                                } else {
+                                    Some(text.to_string())
+                                }
+                            };
+                            let remote = non_empty_if_changed(
+                                remote_entry.text().as_str(),
+                                original.remote.as_deref(),
+                            );
+                            let port = non_empty_if_changed(
+                                port_entry.text().as_str(),
+                                original.port.as_deref(),
+                            );
+                            let cipher = non_empty_if_changed(
+                                cipher_entry.text().as_str(),
+                                original.cipher.as_deref(),
+                            );
+                            let protocol_tcp = protocol_combo.active_id().and_then(|id| {
+                                let new_is_tcp = id == "tcp";
+                                let original_is_tcp = original.protocol.as_deref() == Some("tcp");
+                                (new_is_tcp != original_is_tcp).then_some(new_is_tcp)
+                            });
+
                             sender.input(AppMsg::SaveCredentials {
                                 name: name_for_response.clone(),
                                 uuid: uuid_for_response.clone(),
-                                username: username_entry.text().to_string(),
-                                password: password_entry.text().to_string(),
+                                username,
+                                password,
+                                remote,
+                                port,
+                                protocol_tcp,
+                                cipher,
                             });
                         }
                         dialog.close();
@@ -327,27 +420,45 @@ impl SimpleComponent for App {
                 uuid,
                 username,
                 password,
+                remote,
+                port,
+                protocol_tcp,
+                cipher,
             } => {
-                self.status = "Saving credentials...".to_string();
+                self.status = "Saving connection settings...".to_string();
                 self.busy = true;
                 let sender = sender.clone();
                 relm4::spawn(async move {
                     let nm = NetworkManager::new();
                     let msg = async {
-                        if !username.is_empty() {
-                            nm.set_username(&name, &username).await?;
+                        if let Some(username) = &username {
+                            nm.set_username(&name, username).await?;
                         }
-                        nm.mark_password_agent_owned(&name).await?;
-                        secrets::keyring::store_password(&uuid, &name, &password)
-                            .await
-                            .map_err(|err| anyhow::anyhow!(err))?;
+                        if let Some(remote) = &remote {
+                            nm.set_remote(&name, remote).await?;
+                        }
+                        if let Some(port) = &port {
+                            nm.set_port(&name, port).await?;
+                        }
+                        if let Some(cipher) = &cipher {
+                            nm.set_cipher(&name, cipher).await?;
+                        }
+                        if let Some(is_tcp) = protocol_tcp {
+                            nm.set_protocol_tcp(&name, is_tcp).await?;
+                        }
+                        if let Some(password) = &password {
+                            nm.mark_password_agent_owned(&name).await?;
+                            secrets::keyring::store_password(&uuid, &name, password)
+                                .await
+                                .map_err(|err| anyhow::anyhow!(err))?;
+                        }
                         nm.list_profiles().await
                     }
                     .await;
 
                     let msg = match msg {
                         Ok(profiles) => AppMsg::Refreshed(profiles),
-                        Err(err) => AppMsg::Error(format!("Failed to save credentials: {err:#}")),
+                        Err(err) => AppMsg::Error(format!("Failed to save connection: {err:#}")),
                     };
                     sender.input(msg);
                 });
@@ -405,7 +516,7 @@ impl SimpleComponent for App {
 
             let edit = gtk::Button::builder()
                 .icon_name("document-edit-symbolic")
-                .tooltip_text("Edit credentials")
+                .tooltip_text("Edit connection settings")
                 .build();
             {
                 let name = profile.name.clone();
@@ -439,6 +550,21 @@ impl SimpleComponent for App {
 }
 
 impl App {}
+
+/// Returns `Some(new)` if `new` is non-empty and differs from `original`
+/// (treating an absent/unparsed `original` as different from any non-empty
+/// value), or `None` if there's nothing to change - used so fields we
+/// couldn't parse from an existing connection (and thus left blank in the
+/// dialog) aren't clobbered unless the user actually typed something.
+fn non_empty_if_changed(new: &str, original: Option<&str>) -> Option<String> {
+    if new.is_empty() {
+        return None;
+    }
+    if original == Some(new) {
+        return None;
+    }
+    Some(new.to_string())
+}
 
 /// Launch the GTK application. Blocks until the window is closed.
 pub fn run() {

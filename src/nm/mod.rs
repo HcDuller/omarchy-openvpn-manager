@@ -67,6 +67,26 @@ impl NetworkManager {
         cli::set_vpn_username(name, username).await
     }
 
+    /// Set the remote server address.
+    pub async fn set_remote(&self, name: &str, remote: &str) -> Result<()> {
+        cli::set_vpn_remote(name, remote).await
+    }
+
+    /// Set the remote server port.
+    pub async fn set_port(&self, name: &str, port: &str) -> Result<()> {
+        cli::set_vpn_port(name, port).await
+    }
+
+    /// Set the transport protocol (TCP if `true`, UDP if `false`).
+    pub async fn set_protocol_tcp(&self, name: &str, is_tcp: bool) -> Result<()> {
+        cli::set_vpn_protocol_tcp(name, is_tcp).await
+    }
+
+    /// Set the data cipher.
+    pub async fn set_cipher(&self, name: &str, cipher: &str) -> Result<()> {
+        cli::set_vpn_cipher(name, cipher).await
+    }
+
     /// Mark a connection's VPN password as agent-owned, so our registered
     /// Secret Agent is asked for it at connect time.
     pub async fn mark_password_agent_owned(&self, name: &str) -> Result<()> {

@@ -174,16 +174,25 @@ pub struct VpnConnectionDetails {
     /// plain `.ovpn` import, since `auth-user-pass` files don't usually
     /// carry the username itself).
     pub username: Option<String>,
+    /// Remote server address, if parseable.
+    pub remote: Option<String>,
+    /// Remote server port, if parseable.
+    pub port: Option<String>,
+    /// Transport protocol, either "tcp" or "udp", if parseable.
+    pub protocol: Option<String>,
+    /// Data cipher, if parseable.
+    pub cipher: Option<String>,
 }
 
 /// Parse the `vpn.data` map property of a connection to determine whether
-/// it needs username/password credentials, and any already-known username.
+/// it needs username/password credentials, and any already-known settings.
 ///
 /// Best-effort parser: `vpn.data` is a comma-separated `key = value` map as
 /// printed by `nmcli -g`. This has not been validated against every
 /// NetworkManager-openvpn plugin version; if key names differ, callers will
-/// simply see `needs_auth: false` and no pre-filled username rather than a
-/// hard failure.
+/// simply see the corresponding field as `None`/`false` rather than a hard
+/// failure. Callers should treat unparsed fields as "leave alone" rather
+/// than "clear this value" to avoid clobbering a working connection.
 pub async fn get_connection_details(name: &str) -> Result<VpnConnectionDetails> {
     let out = run(&["-g", "vpn.data", "connection", "show", name]).await?;
     let data = parse_vpn_data(&out);
@@ -193,9 +202,21 @@ pub async fn get_connection_details(name: &str) -> Result<VpnConnectionDetails> 
         .map(|v| v == "password" || v == "password-tls")
         .unwrap_or(false);
 
+    let protocol = data.get("proto-tcp").map(|v| {
+        if v == "yes" {
+            "tcp".to_string()
+        } else {
+            "udp".to_string()
+        }
+    });
+
     Ok(VpnConnectionDetails {
         needs_auth,
         username: data.get("username").cloned(),
+        remote: data.get("remote").cloned(),
+        port: data.get("port").cloned(),
+        protocol,
+        cipher: data.get("cipher").cloned(),
     })
 }
 
@@ -214,12 +235,39 @@ fn parse_vpn_data(raw: &str) -> HashMap<String, String> {
 /// Sets the `username` sub-key of a connection's `vpn.data` map, without
 /// disturbing other keys already present.
 pub async fn set_vpn_username(name: &str, username: &str) -> Result<()> {
+    set_vpn_data_key(name, "username", username).await
+}
+
+/// Sets the `remote` sub-key (server address).
+pub async fn set_vpn_remote(name: &str, remote: &str) -> Result<()> {
+    set_vpn_data_key(name, "remote", remote).await
+}
+
+/// Sets the `port` sub-key.
+pub async fn set_vpn_port(name: &str, port: &str) -> Result<()> {
+    set_vpn_data_key(name, "port", port).await
+}
+
+/// Sets the transport protocol: `true` for TCP, `false` for UDP.
+pub async fn set_vpn_protocol_tcp(name: &str, is_tcp: bool) -> Result<()> {
+    set_vpn_data_key(name, "proto-tcp", if is_tcp { "yes" } else { "no" }).await
+}
+
+/// Sets the `cipher` sub-key.
+pub async fn set_vpn_cipher(name: &str, cipher: &str) -> Result<()> {
+    set_vpn_data_key(name, "cipher", cipher).await
+}
+
+/// Sets a single sub-key of a connection's `vpn.data` map property without
+/// disturbing other keys already present (via nmcli's `+vpn.data` merge
+/// syntax, rather than replacing the whole map).
+async fn set_vpn_data_key(name: &str, key: &str, value: &str) -> Result<()> {
     run(&[
         "connection",
         "modify",
         name,
         "+vpn.data",
-        &format!("username={username}"),
+        &format!("{key}={value}"),
     ])
     .await?;
     Ok(())
@@ -230,15 +278,7 @@ pub async fn set_vpn_username(name: &str, username: &str) -> Result<()> {
 /// instead of expecting it embedded in the connection or prompting
 /// interactively (which requires a TTY we don't have from a GUI app).
 pub async fn mark_password_agent_owned(name: &str) -> Result<()> {
-    run(&[
-        "connection",
-        "modify",
-        name,
-        "+vpn.data",
-        "password-flags=1",
-    ])
-    .await?;
-    Ok(())
+    set_vpn_data_key(name, "password-flags", "1").await
 }
 
 /// Split a line of `nmcli -t` output on unescaped `:` separators.
