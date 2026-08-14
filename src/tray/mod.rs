@@ -88,6 +88,14 @@ impl Tray for VpnTray {
             }
             .into(),
             StandardItem {
+                label: "Open OpenVPN Manager".into(),
+                activate: Box::new(|_this: &mut Self| {
+                    crate::ui::request_show_window();
+                }),
+                ..Default::default()
+            }
+            .into(),
+            StandardItem {
                 label: "Quit".into(),
                 activate: Box::new(|_this: &mut Self| {
                     std::process::exit(0);

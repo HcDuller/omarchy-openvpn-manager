@@ -7,6 +7,23 @@ use crate::secrets;
 use gtk::prelude::*;
 use relm4::prelude::*;
 use relm4::{ComponentParts, ComponentSender, RelmApp, RelmWidgetExt};
+use std::cell::Cell;
+use std::sync::OnceLock;
+
+/// Sender used to deliver `AppMsg`s from outside the component tree (e.g.
+/// the tray icon's "Open OpenVPN Manager" menu item, which runs on a
+/// separate tokio runtime/thread from the GTK main loop). `relm4::Sender`
+/// is `Send + Sync` and safe to use across threads; the receiving end
+/// wakes the GLib main context automatically.
+static APP_SENDER: OnceLock<relm4::Sender<AppMsg>> = OnceLock::new();
+
+/// Requests that the main window be shown/raised, e.g. from the tray menu.
+/// A no-op if the app hasn't finished initializing yet.
+pub fn request_show_window() {
+    if let Some(sender) = APP_SENDER.get() {
+        sender.emit(AppMsg::ShowWindow);
+    }
+}
 
 /// Top level application state.
 pub struct App {
@@ -14,6 +31,10 @@ pub struct App {
     status: String,
     busy: bool,
     input_sender: relm4::Sender<AppMsg>,
+    /// Set when a `ShowWindow` request needs to be applied on the next
+    /// render pass; read (and cleared) from `post_view`, which only gets
+    /// `&self`, hence the `Cell` for interior mutability.
+    pending_show: Cell<bool>,
 }
 
 #[derive(Debug)]
@@ -50,6 +71,9 @@ pub enum AppMsg {
         remote: Option<String>,
         cipher: Option<String>,
     },
+    /// Raise/show the main window (e.g. requested from the tray menu after
+    /// the window was hidden via close-to-tray).
+    ShowWindow,
     /// An async action reported an error to surface in the status label.
     Error(String),
 }
@@ -73,6 +97,7 @@ impl SimpleComponent for App {
     type Output = ();
 
     view! {
+        #[name = "main_window"]
         gtk::Window {
             set_title: Some("OpenVPN Manager"),
             set_default_size: (480, 400),
@@ -136,9 +161,26 @@ impl SimpleComponent for App {
             status: "Loading profiles...".to_string(),
             busy: false,
             input_sender: sender.input_sender().clone(),
+            pending_show: Cell::new(false),
         };
 
+        // `root` is a ref-counted GObject handle; clone it before
+        // `view_output!()` so we retain our own reference to the same
+        // window for the close-request hook below.
+        let window_for_close = root.clone();
+
         let widgets = view_output!();
+
+        // Close-to-tray: hitting the window's close button hides it
+        // instead of destroying/quitting the app, so the tray icon and
+        // background secret agent stay alive and reachable. The only way
+        // to fully exit is the tray's "Quit" menu item.
+        window_for_close.connect_close_request(|window| {
+            window.set_visible(false);
+            gtk::glib::Propagation::Stop
+        });
+
+        let _ = APP_SENDER.set(sender.input_sender().clone());
 
         sender.input(AppMsg::Refresh);
 
@@ -516,6 +558,9 @@ impl SimpleComponent for App {
                     sender.input(msg);
                 });
             }
+            AppMsg::ShowWindow => {
+                self.pending_show.set(true);
+            }
             AppMsg::Error(message) => {
                 self.status = message;
                 self.busy = false;
@@ -524,6 +569,10 @@ impl SimpleComponent for App {
     }
 
     fn post_view(&self) {
+        if self.pending_show.replace(false) {
+            main_window.present();
+        }
+
         while let Some(row) = profile_list.first_child() {
             profile_list.remove(&row);
         }
