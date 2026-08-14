@@ -2,6 +2,7 @@
 //! OpenVPN connections through NetworkManager on Omarchy.
 
 mod nm;
+mod secrets;
 mod tray;
 mod ui;
 
@@ -12,6 +13,21 @@ fn main() {
     // relm4/gtk own the main thread's event loop.
     let runtime = tokio::runtime::Runtime::new().expect("failed to start tokio runtime");
     let _guard = runtime.enter();
+
+    runtime.spawn(async {
+        match secrets::agent::register().await {
+            Ok(conn) => {
+                eprintln!("[main] secret agent registered");
+                // Keep the D-Bus connection alive for the life of the
+                // process; NetworkManager drops the agent registration if
+                // this connection closes.
+                std::mem::forget(conn);
+            }
+            Err(err) => {
+                eprintln!("[main] failed to register secret agent: {err:#}");
+            }
+        }
+    });
 
     runtime.spawn(async {
         match tray::spawn().await {

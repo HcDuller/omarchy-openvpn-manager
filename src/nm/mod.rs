@@ -10,7 +10,7 @@ pub mod watcher;
 
 #[allow(unused_imports)]
 // ConnectionState is reserved for future fine-grained status reporting
-pub use cli::{ConnectionState, VpnProfile};
+pub use cli::{ConnectionState, VpnConnectionDetails, VpnProfile};
 
 use anyhow::Result;
 use std::path::Path;
@@ -54,5 +54,22 @@ impl NetworkManager {
     /// Get the currently active VPN profile, if any.
     pub async fn active_profile(&self) -> Result<Option<VpnProfile>> {
         cli::active_openvpn_profile().await
+    }
+
+    /// Fetch parsed `vpn.data` details for a connection (whether it needs
+    /// username/password credentials, and any already-known username).
+    pub async fn connection_details(&self, name: &str) -> Result<VpnConnectionDetails> {
+        cli::get_connection_details(name).await
+    }
+
+    /// Set the username on a connection's VPN settings.
+    pub async fn set_username(&self, name: &str, username: &str) -> Result<()> {
+        cli::set_vpn_username(name, username).await
+    }
+
+    /// Mark a connection's VPN password as agent-owned, so our registered
+    /// Secret Agent is asked for it at connect time.
+    pub async fn mark_password_agent_owned(&self, name: &str) -> Result<()> {
+        cli::mark_password_agent_owned(name).await
     }
 }

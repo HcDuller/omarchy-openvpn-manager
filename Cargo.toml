@@ -17,6 +17,7 @@ zbus = "5"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "sync"] }
 futures-util = "0.3"
 ksni = "0.3"
+oo7 = "0.6"
 anyhow = "1"
 thiserror = "2"
 serde = { version = "1", features = ["derive"] }

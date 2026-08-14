@@ -3,6 +3,7 @@
 //! current connection status.
 
 use crate::nm::{NetworkManager, VpnProfile};
+use crate::secrets;
 use gtk::prelude::*;
 use relm4::prelude::*;
 use relm4::{ComponentParts, ComponentSender, RelmApp, RelmWidgetExt};
@@ -32,6 +33,15 @@ pub enum AppMsg {
     Delete(String),
     /// Open the GTK file chooser to pick a `.ovpn` file.
     OpenImportDialog,
+    /// User asked to edit the credentials of an existing profile.
+    OpenEditDialog { name: String, uuid: String },
+    /// User submitted new credentials from the edit dialog.
+    SaveCredentials {
+        name: String,
+        uuid: String,
+        username: String,
+        password: String,
+    },
     /// An async action reported an error to surface in the status label.
     Error(String),
 }
@@ -243,6 +253,105 @@ impl SimpleComponent for App {
                     sender.input(msg);
                 });
             }
+            AppMsg::OpenEditDialog { name, uuid } => {
+                let sender = sender.clone();
+                relm4::spawn_local(async move {
+                    let nm = NetworkManager::new();
+                    let existing_username = nm
+                        .connection_details(&name)
+                        .await
+                        .ok()
+                        .and_then(|details| details.username)
+                        .unwrap_or_default();
+
+                    let dialog = gtk::Dialog::with_buttons(
+                        Some(&format!("Edit credentials: {name}")),
+                        None::<&gtk::Window>,
+                        gtk::DialogFlags::MODAL,
+                        &[
+                            ("Cancel", gtk::ResponseType::Cancel),
+                            ("Save", gtk::ResponseType::Accept),
+                        ],
+                    );
+
+                    let content = dialog.content_area();
+                    content.set_orientation(gtk::Orientation::Vertical);
+                    content.set_spacing(8);
+                    content.set_margin_top(12);
+                    content.set_margin_bottom(12);
+                    content.set_margin_start(12);
+                    content.set_margin_end(12);
+
+                    let username_entry = gtk::Entry::builder()
+                        .placeholder_text("Username")
+                        .text(&existing_username)
+                        .build();
+                    content.append(
+                        &gtk::Label::builder()
+                            .label("Username")
+                            .halign(gtk::Align::Start)
+                            .build(),
+                    );
+                    content.append(&username_entry);
+
+                    let password_entry = gtk::PasswordEntry::builder()
+                        .placeholder_text("Password")
+                        .show_peek_icon(true)
+                        .build();
+                    content.append(
+                        &gtk::Label::builder()
+                            .label("Password")
+                            .halign(gtk::Align::Start)
+                            .build(),
+                    );
+                    content.append(&password_entry);
+
+                    let name_for_response = name.clone();
+                    let uuid_for_response = uuid.clone();
+                    dialog.connect_response(move |dialog, response| {
+                        if response == gtk::ResponseType::Accept {
+                            sender.input(AppMsg::SaveCredentials {
+                                name: name_for_response.clone(),
+                                uuid: uuid_for_response.clone(),
+                                username: username_entry.text().to_string(),
+                                password: password_entry.text().to_string(),
+                            });
+                        }
+                        dialog.close();
+                    });
+                    dialog.show();
+                });
+            }
+            AppMsg::SaveCredentials {
+                name,
+                uuid,
+                username,
+                password,
+            } => {
+                self.status = "Saving credentials...".to_string();
+                self.busy = true;
+                let sender = sender.clone();
+                relm4::spawn(async move {
+                    let nm = NetworkManager::new();
+                    let msg = async {
+                        if !username.is_empty() {
+                            nm.set_username(&name, &username).await?;
+                        }
+                        nm.mark_password_agent_owned(&name).await?;
+                        secrets::keyring::store_password(&uuid, &name, &password)
+                            .await
+                            .map_err(|err| anyhow::anyhow!(err))?;
+                        nm.list_profiles().await
+                    }
+                    .await;
+
+                    let msg = match msg {
+                        Ok(profiles) => AppMsg::Refreshed(profiles),
+                        Err(err) => AppMsg::Error(format!("Failed to save credentials: {err:#}")),
+                    };
+                    sender.input(msg);
+                });
+            }
             AppMsg::Error(message) => {
                 self.status = message;
                 self.busy = false;
@@ -293,6 +402,23 @@ impl SimpleComponent for App {
                 });
             }
             row.append(&toggle);
+
+            let edit = gtk::Button::builder()
+                .icon_name("document-edit-symbolic")
+                .tooltip_text("Edit credentials")
+                .build();
+            {
+                let name = profile.name.clone();
+                let uuid = profile.uuid.clone();
+                let sender = self.input_sender.clone();
+                edit.connect_clicked(move |_| {
+                    sender.emit(AppMsg::OpenEditDialog {
+                        name: name.clone(),
+                        uuid: uuid.clone(),
+                    });
+                });
+            }
+            row.append(&edit);
 
             let delete = gtk::Button::builder()
                 .icon_name("user-trash-symbolic")

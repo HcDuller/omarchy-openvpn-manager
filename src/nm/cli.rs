@@ -2,6 +2,7 @@
 //! OpenVPN connections.
 
 use anyhow::{bail, Context, Result};
+use std::collections::HashMap;
 use std::path::Path;
 use std::process::Stdio;
 use std::time::Duration;
@@ -149,6 +150,85 @@ pub async fn connection_down(name: &str) -> Result<()> {
 
 pub async fn connection_delete(name: &str) -> Result<()> {
     run(&["connection", "delete", name]).await?;
+    Ok(())
+}
+
+/// Details parsed from a connection's `vpn.data` property, used to decide
+/// whether an import-review/edit dialog is needed and to pre-fill it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct VpnConnectionDetails {
+    /// Whether this connection's auth method requires a username/password
+    /// (NetworkManager-openvpn's `connection-type` is `password` or
+    /// `password-tls`), as opposed to certificate-only or static-key auth.
+    pub needs_auth: bool,
+    /// Username embedded in the connection, if any (rarely present from a
+    /// plain `.ovpn` import, since `auth-user-pass` files don't usually
+    /// carry the username itself).
+    pub username: Option<String>,
+}
+
+/// Parse the `vpn.data` map property of a connection to determine whether
+/// it needs username/password credentials, and any already-known username.
+///
+/// Best-effort parser: `vpn.data` is a comma-separated `key = value` map as
+/// printed by `nmcli -g`. This has not been validated against every
+/// NetworkManager-openvpn plugin version; if key names differ, callers will
+/// simply see `needs_auth: false` and no pre-filled username rather than a
+/// hard failure.
+pub async fn get_connection_details(name: &str) -> Result<VpnConnectionDetails> {
+    let out = run(&["-g", "vpn.data", "connection", "show", name]).await?;
+    let data = parse_vpn_data(&out);
+
+    let needs_auth = data
+        .get("connection-type")
+        .map(|v| v == "password" || v == "password-tls")
+        .unwrap_or(false);
+
+    Ok(VpnConnectionDetails {
+        needs_auth,
+        username: data.get("username").cloned(),
+    })
+}
+
+/// Parses nmcli's `key1 = value1, key2 = value2` map property format into a
+/// lookup table. Does not attempt to handle escaped commas within values.
+fn parse_vpn_data(raw: &str) -> HashMap<String, String> {
+    raw.trim()
+        .split(", ")
+        .filter_map(|pair| {
+            let (key, value) = pair.split_once(" = ")?;
+            Some((key.trim().to_string(), value.trim().to_string()))
+        })
+        .collect()
+}
+
+/// Sets the `username` sub-key of a connection's `vpn.data` map, without
+/// disturbing other keys already present.
+pub async fn set_vpn_username(name: &str, username: &str) -> Result<()> {
+    run(&[
+        "connection",
+        "modify",
+        name,
+        "+vpn.data",
+        &format!("username={username}"),
+    ])
+    .await?;
+    Ok(())
+}
+
+/// Marks the VPN password as agent-owned (`password-flags = 1`), so
+/// NetworkManager asks a running Secret Agent for it at connect time
+/// instead of expecting it embedded in the connection or prompting
+/// interactively (which requires a TTY we don't have from a GUI app).
+pub async fn mark_password_agent_owned(name: &str) -> Result<()> {
+    run(&[
+        "connection",
+        "modify",
+        name,
+        "+vpn.data",
+        "password-flags=1",
+    ])
+    .await?;
     Ok(())
 }
 
