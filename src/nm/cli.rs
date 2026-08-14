@@ -139,7 +139,16 @@ pub async fn import_ovpn(path: &Path) -> Result<String> {
 }
 
 pub async fn connection_up(name: &str) -> Result<()> {
-    run(&["connection", "up", name]).await?;
+    // --ask tells nmcli to allow interactive secret retrieval (sets
+    // AllowInteraction=TRUE on the underlying D-Bus ActivateConnection
+    // call). Without it, NetworkManager never queries registered secret
+    // agents at all (ours included) and nmcli fails immediately with
+    // "... cannot ask without --ask option" whenever a secret like the VPN
+    // password isn't already embedded in the connection. Our registered
+    // secret agent answers the resulting GetSecrets request, so stdin
+    // being null (see `run`) is fine - nmcli's own terminal-prompt
+    // fallback is never reached as long as our agent supplies the secret.
+    run(&["connection", "up", name, "--ask"]).await?;
     Ok(())
 }
 
