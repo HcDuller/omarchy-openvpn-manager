@@ -34,6 +34,29 @@ read_json_field() {
   grep -oP "\"${field}\"\s*:\s*\"?\K[^,\"\n}]+" "$file" 2>/dev/null | head -n1
 }
 
+maybe_disconnect_active_vpn() {
+  command -v nmcli >/dev/null 2>&1 || return 0
+
+  local active_name
+  active_name="$(nmcli -t -f NAME,TYPE,ACTIVE connection show 2>/dev/null \
+    | awk -F: '$2 == "vpn" && $3 == "yes" { print $1; exit }')"
+
+  [ -n "$active_name" ] || return 0
+
+  warn "The OpenVPN connection '${active_name}' is currently active."
+  read -r -p "Disconnect it before uninstalling? [y/N] " reply
+  case "$reply" in
+    [yY] | [yY][eE][sS])
+      log "Disconnecting '${active_name}'..."
+      nmcli connection down "$active_name" >/dev/null 2>&1 || \
+        warn "Failed to disconnect '${active_name}'; continuing uninstall anyway."
+      ;;
+    *)
+      log "Leaving '${active_name}' connected."
+      ;;
+  esac
+}
+
 maybe_revert_networkd() {
   [ -f "${NETWORK_STATE_FILE}" ] || return 0
 
@@ -84,6 +107,7 @@ maybe_revert_networkd() {
 }
 
 main() {
+  maybe_disconnect_active_vpn
   maybe_revert_networkd
 
   remove_path "${BIN_DIR}/${APP_NAME}"

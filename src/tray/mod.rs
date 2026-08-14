@@ -98,7 +98,7 @@ impl Tray for VpnTray {
             StandardItem {
                 label: "Quit".into(),
                 activate: Box::new(|_this: &mut Self| {
-                    std::process::exit(0);
+                    crate::ui::request_quit();
                 }),
                 ..Default::default()
             }

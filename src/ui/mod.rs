@@ -25,6 +25,18 @@ pub fn request_show_window() {
     }
 }
 
+/// Requests that the app quit, checking first whether a VPN is active and
+/// prompting the user about it (rather than silently leaving it connected
+/// or silently disconnecting it). A no-op if the app hasn't finished
+/// initializing yet; falls back to exiting immediately in that case since
+/// there's no component around to run the check/prompt.
+pub fn request_quit() {
+    match APP_SENDER.get() {
+        Some(sender) => sender.emit(AppMsg::QuitRequested),
+        None => std::process::exit(0),
+    }
+}
+
 /// Top level application state.
 pub struct App {
     profiles: Vec<VpnProfile>,
@@ -74,6 +86,10 @@ pub enum AppMsg {
     /// Raise/show the main window (e.g. requested from the tray menu after
     /// the window was hidden via close-to-tray).
     ShowWindow,
+    /// User asked to quit (e.g. via the tray's Quit item). Checks for an
+    /// active VPN connection and prompts before exiting, rather than
+    /// exiting unconditionally.
+    QuitRequested,
     /// An async action reported an error to surface in the status label.
     Error(String),
 }
@@ -560,6 +576,55 @@ impl SimpleComponent for App {
             }
             AppMsg::ShowWindow => {
                 self.pending_show.set(true);
+            }
+            AppMsg::QuitRequested => {
+                relm4::spawn_local(async move {
+                    let nm = NetworkManager::new();
+                    let active = nm.active_profile().await.ok().flatten();
+
+                    let Some(profile) = active else {
+                        std::process::exit(0);
+                    };
+
+                    let dialog = gtk::MessageDialog::new(
+                        None::<&gtk::Window>,
+                        gtk::DialogFlags::MODAL,
+                        gtk::MessageType::Question,
+                        gtk::ButtonsType::None,
+                        format!(
+                            "'{}' is currently connected. Disconnect before quitting?",
+                            profile.name
+                        ),
+                    );
+                    dialog.add_button("Cancel", gtk::ResponseType::Cancel);
+                    dialog.add_button("Quit without disconnecting", gtk::ResponseType::Close);
+                    dialog.add_button("Disconnect and Quit", gtk::ResponseType::Accept);
+                    dialog.set_default_response(gtk::ResponseType::Accept);
+
+                    dialog.connect_response(move |dialog, response| {
+                        dialog.close();
+                        match response {
+                            gtk::ResponseType::Accept => {
+                                let name = profile.name.clone();
+                                relm4::spawn(async move {
+                                    let nm = NetworkManager::new();
+                                    if let Err(err) = nm.disconnect(&name).await {
+                                        eprintln!("[ui] failed to disconnect before quit: {err:#}");
+                                    }
+                                    std::process::exit(0);
+                                });
+                            }
+                            gtk::ResponseType::Close => {
+                                std::process::exit(0);
+                            }
+                            _ => {
+                                // Cancel, or the dialog was dismissed
+                                // otherwise: stay running.
+                            }
+                        }
+                    });
+                    dialog.show();
+                });
             }
             AppMsg::Error(message) => {
                 self.status = message;
